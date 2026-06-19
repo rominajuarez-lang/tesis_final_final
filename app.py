@@ -193,10 +193,9 @@ def evaluar_sku(product_id, ventas, forecast_empresa, maestro):
     ventas_sku = ventas[ventas["product_id"] == product_id].copy()
     ventas_sku = ventas_sku.sort_values("date")
 
-    train = ventas_sku[ventas_sku["date"].dt.year < 2025]
-    real_2025 = ventas_sku[ventas_sku["date"].dt.year == 2025]
+    real_2025 = ventas_sku[ventas_sku["date"].dt.year == 2025].copy()
 
-    if len(train) < 6 or len(real_2025) == 0:
+    if len(real_2025) < 6:
         return None
 
     fc_empresa_2025 = forecast_empresa[
@@ -213,7 +212,6 @@ def evaluar_sku(product_id, ventas, forecast_empresa, maestro):
     if df_2025.empty:
         return None
 
-    train_y = train["demand_real"].to_numpy(dtype=float)
     y_real = df_2025["demand_real"].to_numpy(dtype=float)
     y_empresa = df_2025["forecast_company"].to_numpy(dtype=float)
     fechas_2025 = df_2025["date"]
@@ -222,8 +220,12 @@ def evaluar_sku(product_id, ventas, forecast_empresa, maestro):
     costo = float(costo.iloc[0]) if len(costo) > 0 else 0
 
     resultados = []
+    predicciones_2025 = {}
+    predicciones_2026 = {}
 
-    exceso_emp, faltante_emp, error_emp_soles = errores_valorizados(y_real, y_empresa, costo)
+    exceso_emp, faltante_emp, error_emp_soles = errores_valorizados(
+        y_real, y_empresa, costo
+    )
 
     resultados.append({
         "Modelo": "Forecast empresa",
@@ -234,18 +236,24 @@ def evaluar_sku(product_id, ventas, forecast_empresa, maestro):
         "Error valorizado S/": error_emp_soles,
     })
 
-    predicciones_2025 = {}
-
     for metodo in METODOS:
-        pred = generar_prediccion(train_y, metodo, len(y_real))
-        predicciones_2025[metodo] = pred
+        # Ajuste 2025
+        pred_2025 = generar_prediccion(y_real, metodo, len(y_real))
 
-        exceso, faltante, error_soles = errores_valorizados(y_real, pred, costo)
+        # Pronóstico 2026
+        pred_2026 = generar_prediccion(y_real, metodo, 12)
+
+        predicciones_2025[metodo] = pred_2025
+        predicciones_2026[metodo] = pred_2026
+
+        exceso, faltante, error_soles = errores_valorizados(
+            y_real, pred_2025, costo
+        )
 
         resultados.append({
             "Modelo": metodo,
-            "wMAPE (%)": wmape(y_real, pred),
-            "Bias (%)": bias_pct(y_real, pred),
+            "wMAPE (%)": wmape(y_real, pred_2025),
+            "Bias (%)": bias_pct(y_real, pred_2025),
             "Exceso und": exceso,
             "Faltante und": faltante,
             "Error valorizado S/": error_soles,
@@ -259,15 +267,12 @@ def evaluar_sku(product_id, ventas, forecast_empresa, maestro):
 
     empresa = tabla[tabla["Modelo"] == "Forecast empresa"].iloc[0]
 
-    # Forecast 2026 con el mejor modelo, entrenando hasta 2025
-    full_train = ventas_sku[ventas_sku["date"].dt.year <= 2025]["demand_real"].to_numpy(dtype=float)
     fechas_2026 = pd.date_range(start="2026-01-01", periods=12, freq="MS")
-    pred_2026 = generar_prediccion(full_train, mejor_modelo, 12)
 
     forecast_2026 = pd.DataFrame({
         "product_id": product_id,
         "date": fechas_2026,
-        "forecast_2026": pred_2026,
+        "forecast_2026": predicciones_2026[mejor_modelo],
         "best_model": mejor_modelo,
     })
 
@@ -288,45 +293,6 @@ def evaluar_sku(product_id, ventas, forecast_empresa, maestro):
         "bias_propuesto": mejor["Bias (%)"],
         "forecast_2026": forecast_2026,
     }
-
-
-@st.cache_data
-def evaluar_todos(ventas, forecast_empresa, maestro):
-    resumen = []
-    detalles = {}
-    pronosticos_2026 = []
-
-    productos = sorted(set(ventas["product_id"]) & set(forecast_empresa["product_id"]))
-
-    for p in productos:
-        r = evaluar_sku(p, ventas, forecast_empresa, maestro)
-
-        if r is None:
-            continue
-
-        detalles[p] = r
-        pronosticos_2026.append(r["forecast_2026"])
-
-        resumen.append({
-            "product_id": p,
-            "mejor_modelo": r["mejor_modelo"],
-            "wMAPE empresa (%)": r["wmape_empresa"],
-            "wMAPE propuesto (%)": r["wmape_propuesto"],
-            "Bias empresa (%)": r["bias_empresa"],
-            "Bias propuesto (%)": r["bias_propuesto"],
-            "Error empresa S/": r["error_empresa"],
-            "Error propuesto S/": r["error_propuesto"],
-            "Ahorro potencial S/": r["ahorro"],
-        })
-
-    df_resumen = pd.DataFrame(resumen)
-
-    if pronosticos_2026:
-        df_2026 = pd.concat(pronosticos_2026, ignore_index=True)
-    else:
-        df_2026 = pd.DataFrame()
-
-    return df_resumen, detalles, df_2026
 
 
 # =========================================================
